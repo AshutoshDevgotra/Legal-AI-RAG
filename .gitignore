@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .env.local
 .env.*.local
+pdfs/
+Data/
+Ingest/
