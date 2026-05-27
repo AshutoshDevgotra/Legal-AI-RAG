@@ -10,14 +10,30 @@ from groq import Groq, RateLimitError, APIStatusError
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-# HuggingFace Inference API for embeddings (no local model needed)
+# --- Embedding Setup ---
+# Uses local sentence-transformers if available (for development),
+# otherwise falls back to HuggingFace Inference API (for deployment).
+_local_embedder = None
+_use_local = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    _local_embedder = SentenceTransformer("all-mpnet-base-v2")
+    _use_local = True
+    print("✅ Using local sentence-transformers for embeddings")
+except ImportError:
+    print("📡 Using HuggingFace Inference API for embeddings")
+
 HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-mpnet-base-v2"
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 
 def get_embedding(text: str) -> list:
-    """Get embedding vector via HuggingFace Inference API."""
+    """Get embedding vector - local model if available, otherwise HF API."""
+    if _use_local and _local_embedder is not None:
+        return _local_embedder.encode(text).tolist()
+
     response = requests.post(
         HF_API_URL,
         headers=HF_HEADERS,
