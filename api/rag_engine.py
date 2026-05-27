@@ -25,7 +25,7 @@ except ImportError:
     print("📡 Using HuggingFace Inference API for embeddings")
 
 HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-mpnet-base-v2"
-HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("HF_API_KEY", ""))
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 
@@ -34,14 +34,27 @@ def get_embedding(text: str) -> list:
     if _use_local and _local_embedder is not None:
         return _local_embedder.encode(text).tolist()
 
-    response = requests.post(
-        HF_API_URL,
-        headers=HF_HEADERS,
-        json={"inputs": text, "options": {"wait_for_model": True}}
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"HF Embedding API error: {response.status_code} - {response.text}")
-    return response.json()
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                HF_API_URL,
+                headers=HF_HEADERS,
+                json={"inputs": text, "options": {"wait_for_model": True}},
+                timeout=15
+            )
+            if response.status_code != 200:
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(f"HF Embedding API error: {response.status_code} - {response.text}")
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"HF API connection error (attempt {attempt+1}/{retries}): {e}")
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                raise e
 
 
 # Pinecone vector DB
