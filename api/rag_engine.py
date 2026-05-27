@@ -1,65 +1,36 @@
 import os
 import time
-import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from groq import Groq, RateLimitError, APIStatusError
+from groq import Groq, RateLimitError
+import google.generativeai as genai
 
 # Resolve AI-RAG project root
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-# --- Embedding Setup ---
-# Uses local sentence-transformers if available (for development),
-# otherwise falls back to HuggingFace Inference API (for deployment).
-_local_embedder = None
-_use_local = False
-
-try:
-    from sentence_transformers import SentenceTransformer
-    _local_embedder = SentenceTransformer("all-mpnet-base-v2")
-    _use_local = True
-    print("✅ Using local sentence-transformers for embeddings")
-except ImportError:
-    print("📡 Using HuggingFace Inference API for embeddings")
-
-HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-mpnet-base-v2"
-HF_TOKEN = os.getenv("HF_TOKEN", os.getenv("HF_API_KEY", ""))
-HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-
-
-def get_embedding(text: str) -> list:
-    """Get embedding vector - local model if available, otherwise HF API."""
-    if _use_local and _local_embedder is not None:
-        return _local_embedder.encode(text).tolist()
-
-    retries = 3
-    for attempt in range(retries):
-        try:
-            response = requests.post(
-                HF_API_URL,
-                headers=HF_HEADERS,
-                json={"inputs": text, "options": {"wait_for_model": True}},
-                timeout=15
-            )
-            if response.status_code != 200:
-                if attempt < retries - 1:
-                    time.sleep(2 ** attempt)
-                    continue
-                raise RuntimeError(f"HF Embedding API error: {response.status_code} - {response.text}")
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"HF API connection error (attempt {attempt+1}/{retries}): {e}")
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                raise e
-
-
 # Pinecone vector DB
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(os.getenv("PINECONE_INDEX"))
+
+# Gemini for Embeddings
+# We use Gemini embeddings here because the Hugging Face Inference API was failing/timing out on Render,
+# and we found an existing Pinecone index (nyayadwaar-gemini) built with Gemini embeddings!
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
+else:
+    print("Warning: GEMINI_API_KEY not set!")
+
+def get_embedding(text: str) -> list:
+    """Get embedding vector using Google Gemini."""
+    result = genai.embed_content(
+        model="models/embedding-001",
+        content=text,
+        task_type="retrieval_document"
+    )
+    return result['embedding']
 
 # Groq reasoning LLM
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
