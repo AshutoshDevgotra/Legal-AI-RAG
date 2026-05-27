@@ -1,9 +1,10 @@
 import os
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
-import google.generativeai as genai
+from groq import Groq, RateLimitError, APIStatusError
 
 # Resolve AI-RAG project root
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,9 +17,9 @@ embedder = SentenceTransformer("all-mpnet-base-v2")
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(os.getenv("PINECONE_INDEX"))
 
-# Gemini reasoning LLM
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-llm = genai.GenerativeModel("models/gemini-2.0-flash")
+# Groq reasoning LLM
+client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 
 def ask_legal_ai(question: str):
@@ -67,9 +68,28 @@ QUESTION:
 {question}
 """
 
-    response = llm.generate_content(prompt)
+    retries = 3
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a legal assistant. Answer strictly from the provided context. Mention proper section numbers."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=1024,
+            )
+            break
+        except RateLimitError as e:
+            if attempt < retries - 1:
+                sleep_time = 2 ** attempt  # 1s, 2s, 4s...
+                print(f"Rate limit hit. Retrying in {sleep_time}s...")
+                time.sleep(sleep_time)
+            else:
+                raise e
 
     return {
-        "answer": response.text,
+        "answer": response.choices[0].message.content,
         "sources": safe_matches
     }
