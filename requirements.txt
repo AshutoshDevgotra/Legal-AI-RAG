@@ -4,3 +4,4 @@ python-dotenv
 pinecone
 requests
 groq
+google-generativeai
