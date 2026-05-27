@@ -1,17 +1,32 @@
 import os
 import time
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from sentence_transformers import SentenceTransformer
 from groq import Groq, RateLimitError, APIStatusError
 
 # Resolve AI-RAG project root
 ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
-# Local embedding engine
-embedder = SentenceTransformer("all-mpnet-base-v2")
+# HuggingFace Inference API for embeddings (no local model needed)
+HF_API_URL = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/all-mpnet-base-v2"
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+
+
+def get_embedding(text: str) -> list:
+    """Get embedding vector via HuggingFace Inference API."""
+    response = requests.post(
+        HF_API_URL,
+        headers=HF_HEADERS,
+        json={"inputs": text, "options": {"wait_for_model": True}}
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"HF Embedding API error: {response.status_code} - {response.text}")
+    return response.json()
+
 
 # Pinecone vector DB
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
@@ -23,7 +38,7 @@ GROQ_MODEL = "llama-3.1-8b-instant"
 
 
 def ask_legal_ai(question: str):
-    qvec = embedder.encode(question).tolist()
+    qvec = get_embedding(question)
 
     results = index.query(
         vector=qvec,
