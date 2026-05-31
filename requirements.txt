@@ -2,5 +2,4 @@ fastapi
 uvicorn
 python-dotenv
 pinecone
-requests
 google-genai
