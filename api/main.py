@@ -4,7 +4,6 @@ from fastapi.responses import JSONResponse
 import traceback
 
 from fastapi.middleware.cors import CORSMiddleware
-from groq import RateLimitError
 
 app = FastAPI(title="NyayaSetu AI")
 
@@ -24,13 +23,10 @@ def root():
 def ask(data: dict):
     try:
         return ask_legal_ai(data["question"])
-    except RateLimitError as e:
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Rate Limit Exceeded. Please try again later.", "details": str(e)}
-        )
     except Exception as e:
+        err_str = str(e).lower()
+        status = 429 if any(kw in err_str for kw in ["429", "quota", "rate limit", "resource_exhausted", "rate_limit_exceeded"]) else 500
         return JSONResponse(
-            status_code=500,
+            status_code=status,
             content={"error": str(e), "trace": traceback.format_exc()}
         )

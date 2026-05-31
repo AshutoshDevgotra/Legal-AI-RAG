@@ -1,10 +1,11 @@
 import os
 import time
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 from pinecone import Pinecone
-from groq import Groq, RateLimitError
-import google.generativeai as genai
+from google import genai
+from google.genai import errors as genai_errors
 
 # Resolve AI-RAG project root
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,27 +15,71 @@ load_dotenv(ROOT / ".env")
 pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 index = pc.Index(os.getenv("PINECONE_INDEX"))
 
-# Gemini for Embeddings
-# We use Gemini embeddings here because the Hugging Face Inference API was failing/timing out on Render,
-# and we found an existing Pinecone index (nyayadwaar-gemini) built with Gemini embeddings!
-gemini_api_key = os.getenv("GEMINI_API_KEY")
-if gemini_api_key:
-    genai.configure(api_key=gemini_api_key)
-else:
-    print("Warning: GEMINI_API_KEY not set!")
+# HuggingFace Inference API — all-mpnet-base-v2 (768-dim, same as ingestion model)
+HF_API_KEY = os.getenv("HF_API_KEY")
+HF_EMBED_URL = "https://api-inference.huggingface.co/models/sentence-transformers/all-mpnet-base-v2"
+HF_HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"}
+
+# ── In-memory embedding cache ─────────────────────────────────────────────────
+_embedding_cache: dict[str, list] = {}
+CACHE_MAX_SIZE = 256
 
 def get_embedding(text: str) -> list:
-    """Get embedding vector using Google Gemini."""
-    result = genai.embed_content(
-        model="models/embedding-001",
-        content=text,
-        task_type="retrieval_document"
-    )
-    return result['embedding']
+    """Get embedding via HuggingFace Inference API (all-mpnet-base-v2, 768-dim).
 
-# Groq reasoning LLM
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-GROQ_MODEL = "llama-3.1-8b-instant"
+    No model download — runs entirely as an API call.
+    Handles HF free-tier cold starts (503) with a single retry.
+    """
+    if text in _embedding_cache:
+        return _embedding_cache[text]
+
+    max_retries = 4
+    base_delay = 3
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                HF_EMBED_URL,
+                headers=HF_HEADERS,
+                json={"inputs": text},
+                timeout=30,
+            )
+
+            # 503 = HF model cold-starting on free tier — wait and retry
+            if resp.status_code == 503:
+                wait = float(resp.json().get("estimated_time", base_delay * (2 ** attempt)))
+                print(f"[HF] Model loading, waiting {wait:.0f}s… (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            embedding = resp.json()
+            if isinstance(embedding[0], list):
+                embedding = embedding[0]
+
+            if len(_embedding_cache) >= CACHE_MAX_SIZE:
+                del _embedding_cache[next(iter(_embedding_cache))]
+            _embedding_cache[text] = embedding
+            return embedding
+
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                sleep_time = base_delay * (2 ** attempt)
+                print(f"[HF] Request failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {sleep_time}s…")
+                time.sleep(sleep_time)
+            else:
+                raise RuntimeError(f"HF embedding API failed after {max_retries} attempts: {e}") from e
+
+
+
+
+# Gemini LLM — gemini-2.0-flash (fast, generous free tier)
+gemini_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+gemini_client = genai.Client(
+    api_key=gemini_api_key,
+    http_options={"api_version": "v1"}
+)
+GEMINI_MODEL = "gemini-2.0-flash"
 
 
 def ask_legal_ai(question: str):
@@ -83,28 +128,30 @@ QUESTION:
 {question}
 """
 
-    retries = 3
+    retries = 5
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a legal assistant. Answer strictly from the provided context. Mention proper section numbers."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=1024,
+            response = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={
+                    "system_instruction": "You are a legal assistant. Answer strictly from the provided context. Mention proper section numbers.",
+                    "temperature": 0.3,
+                    "max_output_tokens": 1024,
+                }
             )
             break
-        except RateLimitError as e:
-            if attempt < retries - 1:
-                sleep_time = 2 ** attempt  # 1s, 2s, 4s...
-                print(f"Rate limit hit. Retrying in {sleep_time}s...")
+        except genai_errors.ClientError as e:
+            error_str = str(e).lower()
+            is_rate_limit = any(kw in error_str for kw in ["429", "quota", "rate limit", "resource_exhausted"])
+            if is_rate_limit and attempt < retries - 1:
+                sleep_time = 2 ** attempt  # 1s, 2s, 4s, 8s…
+                print(f"[Gemini] Rate limit hit. Retrying in {sleep_time}s…")
                 time.sleep(sleep_time)
             else:
                 raise e
 
     return {
-        "answer": response.choices[0].message.content,
+        "answer": response.text,
         "sources": safe_matches
     }

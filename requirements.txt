@@ -3,5 +3,4 @@ uvicorn
 python-dotenv
 pinecone
 requests
-groq
-google-generativeai
+google-genai
